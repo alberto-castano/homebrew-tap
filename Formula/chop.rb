@@ -14,7 +14,7 @@ class Chop < Formula
   end
 
   def install
-    system "cargo", "install", *std_cargo_args
+    system "cargo", "install", *std_cargo_args, "--offline"
   end
 
   test do

@@ -1,0 +1,91 @@
+name: Update Chop
+run-name: Update chop ${{ inputs.version }} (${{ inputs.request_id }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published stable Chop version without v
+        required: true
+        type: string
+      request_id:
+        description: Caller identifier (use a unique value for manual retries)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-chop
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 25
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate public release and update formula
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import urllib.request
+
+          version = os.environ['VERSION']
+          if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
+              raise SystemExit('Expected stable version without v')
+          release = json.loads(subprocess.check_output([
+              'gh', 'api', f'repos/alberto-castano/chop/releases/tags/v{version}'
+          ]))
+          if release['draft'] or release['prerelease']:
+              raise SystemExit('Release must be public and stable')
+          path = pathlib.Path('Formula/chop.rb')
+          formula = path.read_text()
+          old = re.search(r'/archive/refs/tags/v(\d+\.\d+\.\d+)\.tar\.gz', formula)
+          if not old:
+              raise SystemExit('Expected a source archive formula')
+          if tuple(map(int, version.split('.'))) < tuple(map(int, old[1].split('.'))):
+              raise SystemExit('Refusing to downgrade the formula')
+          url = f'https://github.com/alberto-castano/chop/archive/refs/tags/v{version}.tar.gz'
+          with urllib.request.urlopen(url, timeout=120) as response:
+              checksum = hashlib.file_digest(response, 'sha256').hexdigest()
+          formula, urls = re.subn(r'^  url ".*"$', f'  url "{url}"', formula, flags=re.M)
+          formula, hashes = re.subn(r'^  sha256 "[0-9a-f]+"$', f'  sha256 "{checksum}"', formula, flags=re.M)
+          if urls != 1 or hashes != 1:
+              raise SystemExit('Expected one URL and checksum')
+          # A formula revision belongs to its old upstream version.
+          if old[1] != version:
+              formula = re.sub(r'^  revision \d+\n', '', formula, flags=re.M)
+          path.write_text(formula)
+          PY
+      - name: Check formula syntax
+        run: ruby -c Formula/chop.rb
+      - name: Verify Homebrew installation
+        run: |
+          brew tap alberto-castano/tap
+          cp Formula/chop.rb "$(brew --repository alberto-castano/tap)/Formula/chop.rb"
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install --build-from-source alberto-castano/tap/chop
+          HOMEBREW_NO_AUTO_UPDATE=1 brew test alberto-castano/tap/chop
+          test "$(chop --version)" = "chop $VERSION"
+      - name: Commit verified formula
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/chop.rb
+          if git diff --cached --quiet; then
+            echo 'Formula is already current'
+            exit 0
+          fi
+          git commit -m "chore: update chop to $VERSION"
+          git pull --rebase origin main
+          git push origin HEAD:main

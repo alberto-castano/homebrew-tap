@@ -14,7 +14,8 @@ class Chop < Formula
   end
 
   def install
-    system "cargo", "install", *std_cargo_args, "--offline"
+    ENV["CARGO_NET_OFFLINE"] = "true"
+    system "cargo", "install", *std_cargo_args
   end
 
   test do
